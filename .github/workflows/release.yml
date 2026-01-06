@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+      
+      - name: Build Release
+        run: cargo build --release
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/release/mcp-proxy.exe
+          generate_release_notes: true
