@@ -1,4 +1,12 @@
-/target
+/target/debug
+/target/release/.fingerprint
+/target/release/build
+/target/release/deps
+/target/release/examples
+/target/release/incremental
+/target/release/.cargo-lock
+/target/release/*.d
+/target/release/*.pdb
 /target2
 Cargo.lock
 *.log
