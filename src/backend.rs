@@ -24,7 +24,6 @@ fn next_proxy_id() -> u64 {
 
 /// Backend instance state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum BackendState {
     Spawning,
     Ready,

@@ -174,6 +174,7 @@ mod tests {
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "initialize");
         assert_eq!(req.id, Some(JsonRpcId::Number(1)));
+        assert!(req.is_initialize());
     }
 
     #[test]
@@ -189,5 +190,87 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","id":"abc-123","method":"test"}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.id, Some(JsonRpcId::String("abc-123".to_string())));
+    }
+    
+    #[test]
+    fn test_response_success() {
+        let response = JsonRpcResponse::success(
+            Some(JsonRpcId::Number(1)),
+            serde_json::json!({"result": "ok"})
+        );
+        assert_eq!(response.jsonrpc, "2.0");
+        assert!(response.result.is_some());
+        assert!(response.error.is_none());
+    }
+    
+    #[test]
+    fn test_response_error() {
+        let response = JsonRpcResponse::error(
+            Some(JsonRpcId::Number(1)),
+            JsonRpcError::new(-32600, "Invalid Request")
+        );
+        assert!(response.result.is_none());
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, -32600);
+    }
+    
+    #[test]
+    fn test_get_uri_from_params() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"test","params":{"uri":"file:///test.rs"}}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.get_uri(), Some("file:///test.rs".to_string()));
+    }
+    
+    #[test]
+    fn test_get_uri_from_text_document() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"test","params":{"textDocument":{"uri":"file:///doc.rs"}}}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.get_uri(), Some("file:///doc.rs".to_string()));
+    }
+    
+    #[test]
+    fn test_get_roots() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"roots":[{"uri":"file:///project1"},{"uri":"file:///project2"}]}}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        let roots = req.get_roots().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0], "file:///project1");
+        assert_eq!(roots[1], "file:///project2");
+    }
+    
+    #[test]
+    fn test_is_shutdown() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"shutdown"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert!(req.is_shutdown());
+        assert!(!req.is_initialize());
+        assert!(!req.is_exit());
+    }
+    
+    #[test]
+    fn test_json_rpc_id_as_string() {
+        let num_id = JsonRpcId::Number(42);
+        assert_eq!(num_id.as_string(), "42");
+        
+        let str_id = JsonRpcId::String("test-id".to_string());
+        assert_eq!(str_id.as_string(), "test-id");
+    }
+    
+    #[test]
+    fn test_error_with_data() {
+        let error = JsonRpcError::new(-32000, "Custom error")
+            .with_data(serde_json::json!({"details": "more info"}));
+        assert!(error.data.is_some());
+    }
+    
+    #[test]
+    fn test_response_serialization() {
+        let response = JsonRpcResponse::success(
+            Some(JsonRpcId::Number(1)),
+            serde_json::json!(null)
+        );
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json.contains("\"id\":1"));
     }
 }

@@ -3,10 +3,10 @@
 use crate::backend::BackendInstance;
 use crate::config::Config;
 use crate::error::{ProxyError, ERROR_BACKEND_SPAWN_FAILED, ERROR_BACKEND_UNAVAILABLE, ERROR_INTERNAL_ERROR};
-use crate::git_filter;
+use crate::git_filter::{self, GitTrackedFiles};
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::throttle::EventThrottler;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ pub struct McpProxy {
     /// Event throttler for file change notifications
     event_throttler: Option<EventThrottler>,
     /// Git tracked files cache per root
-    git_tracked_cache: HashMap<PathBuf, HashSet<PathBuf>>,
+    git_tracked_cache: HashMap<PathBuf, GitTrackedFiles>,
 }
 
 impl McpProxy {
@@ -77,9 +77,8 @@ impl McpProxy {
         });
 
         let event_throttler = if config.debounce_ms > 0 {
-            let (throttler, _rx) = EventThrottler::new(config.debounce_ms);
             info!("Event throttler enabled with {}ms debounce window", config.debounce_ms);
-            Some(throttler)
+            Some(EventThrottler::new(config.debounce_ms))
         } else {
             None
         };
@@ -578,7 +577,7 @@ impl McpProxy {
             return;
         }
 
-        if let Some(event) = throttler.flush().await {
+        if let Some(event) = throttler.flush() {
             debug!("Flushing {} throttled file change events", event.paths.len());
             
             // Group paths by root and send batch notifications
