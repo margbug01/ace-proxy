@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::Deserialize;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 /// JSON config file structure
 #[derive(Deserialize, Default, Debug)]
@@ -130,6 +130,20 @@ impl Config {
             }
             if let Some(v) = fc.git_filter {
                 self.git_filter = v;
+            }
+        }
+        
+        // Validate configured paths exist, fallback to auto-detect if not
+        if let Some(ref path) = self.node {
+            if !path.exists() {
+                warn!("Configured node path does not exist: {}, falling back to auto-detect", path.display());
+                self.node = None;
+            }
+        }
+        if let Some(ref path) = self.auggie_entry {
+            if !path.exists() {
+                warn!("Configured auggie_entry path does not exist: {}, falling back to auto-detect", path.display());
+                self.auggie_entry = None;
             }
         }
         
