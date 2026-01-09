@@ -289,6 +289,33 @@ impl Config {
                 candidates.push(format!(r"{}\Yarn\Data\global\node_modules\@augmentcode\auggie\augment.mjs", localappdata));
             }
             
+            // mise (version manager) - search for auggie in mise installs
+            if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+                let mise_base = format!(r"{}\mise\installs", localappdata);
+                if let Ok(entries) = std::fs::read_dir(&mise_base) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        // Look for npm-augmentcode-auggie-* directories
+                        if name_str.starts_with("npm-augmentcode-auggie") {
+                            // Search version subdirectories
+                            if let Ok(versions) = std::fs::read_dir(entry.path()) {
+                                for ver in versions.flatten() {
+                                    let auggie_path = ver.path()
+                                        .join("node_modules")
+                                        .join("@augmentcode")
+                                        .join("auggie")
+                                        .join("augment.mjs");
+                                    if auggie_path.exists() {
+                                        candidates.push(auggie_path.to_string_lossy().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
             // Try npm root -g to find global modules
             if let Ok(output) = std::process::Command::new("npm").args(["root", "-g"]).output() {
                 if output.status.success() {
