@@ -327,6 +327,33 @@ impl Config {
                 }
             }
             
+            // Custom npm global prefix (npm config get prefix)
+            // This handles cases where user configured custom global directory
+            if let Ok(output) = std::process::Command::new("npm").args(["config", "get", "prefix"]).output() {
+                if output.status.success() {
+                    if let Ok(prefix) = String::from_utf8(output.stdout) {
+                        let prefix = prefix.trim();
+                        // npm on Windows uses prefix\node_modules for global packages
+                        candidates.push(format!(r"{}\node_modules\@augmentcode\auggie\augment.mjs", prefix));
+                        candidates.push(format!(r"{}\node_modules\@augmentcode\auggie\dist\cli.js", prefix));
+                        // Some setups use prefix\node_global\node_modules
+                        candidates.push(format!(r"{}\node_global\node_modules\@augmentcode\auggie\augment.mjs", prefix));
+                    }
+                }
+            }
+            
+            // Fallback: scan common custom global locations on other drives
+            for drive in ['C', 'D', 'E', 'F'] {
+                let custom_paths = [
+                    format!(r"{}:\nodejs\node_global\node_modules\@augmentcode\auggie\augment.mjs", drive),
+                    format!(r"{}:\nodejs\node_modules\@augmentcode\auggie\augment.mjs", drive),
+                    format!(r"{}:\Program Files\nodejs\node_global\node_modules\@augmentcode\auggie\augment.mjs", drive),
+                ];
+                for path in custom_paths {
+                    candidates.push(path);
+                }
+            }
+            
             for path in candidates {
                 let p = PathBuf::from(&path);
                 if p.exists() {
