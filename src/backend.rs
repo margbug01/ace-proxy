@@ -19,7 +19,7 @@ static PROXY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Generate a new unique proxy ID
 fn next_proxy_id() -> u64 {
-    PROXY_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+    PROXY_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Backend instance state

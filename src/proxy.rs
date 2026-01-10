@@ -6,6 +6,7 @@ use crate::error::{ProxyError, ERROR_BACKEND_SPAWN_FAILED, ERROR_BACKEND_UNAVAIL
 use crate::git_filter::{self, GitTrackedFiles};
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::throttle::EventThrottler;
+use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +40,8 @@ pub struct McpProxy {
     event_throttler: Option<EventThrottler>,
     /// Git tracked files cache per root
     git_tracked_cache: HashMap<PathBuf, GitTrackedFiles>,
+    /// Git cache timestamps for TTL
+    git_cache_timestamps: HashMap<PathBuf, Instant>,
 }
 
 impl McpProxy {
@@ -95,6 +98,7 @@ impl McpProxy {
             global_inflight,
             event_throttler,
             git_tracked_cache: HashMap::new(),
+            git_cache_timestamps: HashMap::new(),
         })
     }
 
@@ -517,8 +521,10 @@ impl McpProxy {
         }
     }
 
-    /// Check if a path is git-tracked (with caching)
+    /// Check if a path is git-tracked (with caching and TTL)
     fn is_path_git_tracked(&mut self, path: &PathBuf) -> bool {
+        const GIT_CACHE_TTL_SECS: u64 = 60;
+        
         // Find the root for this path
         let root = self.roots.iter()
             .filter(|r| path.starts_with(r))
@@ -531,11 +537,23 @@ impl McpProxy {
             None => return true, // No root found, allow by default
         };
 
+        // Check if cache is expired (TTL)
+        let cache_expired = self.git_cache_timestamps
+            .get(&root)
+            .map(|ts| ts.elapsed().as_secs() > GIT_CACHE_TTL_SECS)
+            .unwrap_or(true);
+        
+        if cache_expired {
+            self.git_tracked_cache.remove(&root);
+            self.git_cache_timestamps.remove(&root);
+        }
+
         // Check cache or populate it
         if !self.git_tracked_cache.contains_key(&root) {
             if let Some(tracked) = git_filter::get_git_tracked_files(&root) {
                 info!("Git filter cache populated for {}: {} files", root.display(), tracked.len());
                 self.git_tracked_cache.insert(root.clone(), tracked);
+                self.git_cache_timestamps.insert(root.clone(), Instant::now());
             } else {
                 // Not a git repo or git failed, allow all files
                 return true;
@@ -566,7 +584,7 @@ impl McpProxy {
         )
     }
 
-    /// Flush throttled events to backends
+    /// Flush throttled events to backends (batched by root)
     async fn flush_throttled_events(&mut self) {
         let throttler = match self.event_throttler.as_mut() {
             Some(t) => t,
@@ -580,7 +598,9 @@ impl McpProxy {
         if let Some(event) = throttler.flush() {
             debug!("Flushing {} throttled file change events", event.paths.len());
             
-            // Group paths by root and send batch notifications
+            // Group paths by root for batch notifications
+            let mut paths_by_root: HashMap<PathBuf, Vec<String>> = HashMap::new();
+            
             for path in &event.paths {
                 let root = self.roots.iter()
                     .filter(|r| path.starts_with(r))
@@ -589,18 +609,25 @@ impl McpProxy {
                     .or_else(|| self.default_root.clone());
 
                 if let Some(root) = root {
-                    if let Some(backend) = self.backends.get_mut(&root) {
-                        let notification = JsonRpcRequest {
-                            jsonrpc: "2.0".to_string(),
-                            method: "notifications/file/didChange".to_string(),
-                            id: None,
-                            params: Some(serde_json::json!({
-                                "uri": format!("file:///{}", path.display().to_string().replace('\\', "/"))
-                            })),
-                        };
-                        if let Err(e) = backend.send_notification(notification).await {
-                            warn!("Failed to send throttled notification: {}", e);
-                        }
+                    let uri = format!("file:///{}", path.display().to_string().replace('\\', "/"));
+                    paths_by_root.entry(root).or_default().push(uri);
+                }
+            }
+            
+            // Send batch notification per root
+            for (root, uris) in paths_by_root {
+                if let Some(backend) = self.backends.get_mut(&root) {
+                    let notification = JsonRpcRequest {
+                        jsonrpc: "2.0".to_string(),
+                        method: "notifications/files/didChange".to_string(),
+                        id: None,
+                        params: Some(serde_json::json!({
+                            "uris": uris
+                        })),
+                    };
+                    debug!("Sending batch notification with {} uris to {}", uris.len(), root.display());
+                    if let Err(e) = backend.send_notification(notification).await {
+                        warn!("Failed to send throttled notification: {}", e);
                     }
                 }
             }
@@ -641,8 +668,13 @@ impl McpProxy {
         }
     }
 
-    /// Convert file URI to path
+    /// Convert file URI to path (with URL decoding for special characters)
     fn uri_to_path(uri: &str) -> Option<PathBuf> {
+        let decoded_uri = percent_decode_str(uri)
+            .decode_utf8()
+            .ok()?;
+        let uri = decoded_uri.as_ref();
+        
         if uri.starts_with("file:///") {
             #[cfg(windows)]
             {

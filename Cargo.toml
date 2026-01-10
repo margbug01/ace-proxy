@@ -27,6 +27,9 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "1"
 
+# URL decoding
+percent-encoding = "2"
+
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
