@@ -78,8 +78,8 @@ impl Drop for SingleInstanceLock {
 
 #[cfg(unix)]
 fn acquire_single_instance_lock() -> Result<SingleInstanceLock> {
-    use nix::fcntl::{flock, FlockArg};
-    use std::os::unix::io::AsRawFd;
+    use nix::fcntl::{Flock, FlockArg};
+    use std::os::unix::io::AsFd;
     
     let lock_path = std::env::var("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".mcp-proxy.lock"))
@@ -91,7 +91,7 @@ fn acquire_single_instance_lock() -> Result<SingleInstanceLock> {
         .mode(0o600)
         .open(&lock_path)?;
     
-    match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+    match Flock::lock(file.as_fd().try_clone_to_owned()?, FlockArg::LockExclusiveNonblock) {
         Ok(_) => Ok(SingleInstanceLock { _file: file, path: lock_path }),
         Err(nix::errno::Errno::EWOULDBLOCK) => {
             anyhow::bail!("mcp-proxy is already running (lock file: {})", lock_path.display());
