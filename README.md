@@ -73,6 +73,42 @@ MCP 配置（Windsurf / VS Code）：
 
 程序会自动检测 Node.js 和 Auggie 路径。
 
+### 带 Augment 登录环境变量
+
+如果需要配置 Augment API 认证：
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "command": "path/to/mcp-proxy.exe",
+      "args": ["--default-root", "E:\\your-project"],
+      "env": {
+        "AUGMENT_API_TOKEN": "your-access-token",
+        "AUGMENT_API_URL": "your-tenant-url"
+      }
+    }
+  }
+}
+```
+
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "command": "/path/to/mcp-proxy-macos-arm64",
+      "args": ["--default-root", "/Users/yourname/your-project"],
+      "env": {
+        "AUGMENT_API_TOKEN": "your-access-token",
+        "AUGMENT_API_URL": "your-tenant-url"
+      }
+    }
+  }
+}
+```
+
 ### 使用配置文件
 
 创建 `mcp-proxy.json`（放在 exe 同目录）：
