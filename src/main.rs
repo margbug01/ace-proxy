@@ -9,6 +9,9 @@ mod git_filter;
 #[cfg(windows)]
 mod job_object;
 
+#[cfg(unix)]
+mod process_group;
+
 use anyhow::Result;
 use clap::Parser;
 use tracing::{error, info, Level};
@@ -55,6 +58,48 @@ fn acquire_single_instance_mutex() -> Result<SingleInstanceMutex> {
     }
 }
 
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+#[cfg(unix)]
+struct SingleInstanceLock {
+    _file: File,
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for SingleInstanceLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn acquire_single_instance_lock() -> Result<SingleInstanceLock> {
+    use nix::fcntl::{flock, FlockArg};
+    use std::os::unix::io::AsRawFd;
+    
+    let lock_path = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".mcp-proxy.lock"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/mcp-proxy.lock"));
+    
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(&lock_path)?;
+    
+    match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+        Ok(_) => Ok(SingleInstanceLock { _file: file, path: lock_path }),
+        Err(nix::errno::Errno::EWOULDBLOCK) => {
+            anyhow::bail!("mcp-proxy is already running (lock file: {})", lock_path.display());
+        }
+        Err(e) => anyhow::bail!("Failed to acquire lock: {}", e),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::parse();
@@ -79,6 +124,19 @@ async fn main() -> Result<()> {
     let _single_instance_mutex = if config.single_instance {
         match acquire_single_instance_mutex() {
             Ok(m) => Some(m),
+            Err(e) => {
+                error!("{}", e);
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
+
+    #[cfg(unix)]
+    let _single_instance_lock = if config.single_instance {
+        match acquire_single_instance_lock() {
+            Ok(l) => Some(l),
             Err(e) => {
                 error!("{}", e);
                 return Err(e);

@@ -52,14 +52,37 @@ pub struct BackendInstance {
     /// Job object reference for Windows
     #[cfg(windows)]
     job_object_ptr: Option<*const crate::job_object::JobObject>,
+    /// ProcessGroup reference for Unix
+    #[cfg(unix)]
+    process_group_ptr: Option<*const crate::process_group::ProcessGroup>,
 }
 
 impl BackendInstance {
     /// Spawn a new backend instance for the given workspace root
+    #[cfg(windows)]
     pub async fn spawn(
         config: &Config,
         root: PathBuf,
-        #[cfg(windows)] job_object: Option<&crate::job_object::JobObject>,
+        job_object: Option<&crate::job_object::JobObject>,
+    ) -> Result<Self, ProxyError> {
+        Self::spawn_internal(config, root, job_object).await
+    }
+
+    #[cfg(unix)]
+    pub async fn spawn(
+        config: &Config,
+        root: PathBuf,
+        process_group: Option<&crate::process_group::ProcessGroup>,
+    ) -> Result<Self, ProxyError> {
+        Self::spawn_internal(config, root, process_group).await
+    }
+
+    /// Internal spawn implementation
+    #[cfg(windows)]
+    async fn spawn_internal(
+        config: &Config,
+        root: PathBuf,
+        job_object: Option<&crate::job_object::JobObject>,
     ) -> Result<Self, ProxyError> {
         let node_path = config
             .node
@@ -228,6 +251,199 @@ impl BackendInstance {
             #[cfg(windows)]
             job_object_ptr: job_object.map(|j| j as *const _),
         })
+    }
+
+    /// Internal spawn implementation for Unix (macOS/Linux)
+    #[cfg(unix)]
+    async fn spawn_internal(
+        config: &Config,
+        root: PathBuf,
+        process_group: Option<&crate::process_group::ProcessGroup>,
+    ) -> Result<Self, ProxyError> {
+        let node_path = config
+            .node
+            .as_ref()
+            .ok_or_else(|| ProxyError::ConfigError("Node path not configured".to_string()))?;
+
+        let auggie_entry = config
+            .auggie_entry
+            .as_ref()
+            .ok_or_else(|| ProxyError::ConfigError("Auggie entry path not configured".to_string()))?;
+
+        info!(
+            "Spawning backend for root: {} with node: {:?}, entry: {:?}",
+            root.display(),
+            node_path,
+            auggie_entry
+        );
+
+        // Build command
+        let mut cmd = Command::new(node_path);
+        cmd.arg(auggie_entry)
+            .arg("--mcp")
+            .arg("-m")
+            .arg(&config.mode)
+            .arg("--workspace-root")
+            .arg(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .env("AUGMENT_DISABLE_AUTO_UPDATE", "1");
+
+        let mut child = cmd.spawn().map_err(|e| {
+            ProxyError::BackendSpawnFailed(format!(
+                "Failed to spawn backend: {}. Node: {:?}, Entry: {:?}",
+                e, node_path, auggie_entry
+            ))
+        })?;
+
+        // Add to process group on Unix and configure resources
+        if let Some(pid) = child.id() {
+            debug!("Backend process spawned with PID: {}", pid);
+            
+            // Add to process group
+            if let Some(pg) = process_group {
+                match pg.add_process(pid) {
+                    Ok(_) => info!("Process {} added to ProcessGroup", pid),
+                    Err(e) => warn!("Failed to add process to ProcessGroup: {} - process cleanup may not work correctly", e),
+                }
+            }
+            
+            // Set process priority on Unix (nice value)
+            Self::configure_process_resources_unix(pid, config);
+        }
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ProxyError::BackendSpawnFailed("Failed to get stdin handle".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProxyError::BackendSpawnFailed("Failed to get stdout handle".to_string())
+        })?;
+
+        // Create channel for sending requests to backend
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(100);
+
+        // Pending requests map
+        let pending: Arc<Mutex<HashMap<u64, PendingRequest>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending_clone = pending.clone();
+
+        // Spawn task to write to backend stdin
+        let mut stdin_writer = stdin;
+        tokio::spawn(async move {
+            while let Some(line) = stdin_rx.recv().await {
+                if let Err(e) = stdin_writer.write_all(line.as_bytes()).await {
+                    error!("Failed to write to backend stdin: {}", e);
+                    break;
+                }
+                if let Err(e) = stdin_writer.write_all(b"\n").await {
+                    error!("Failed to write newline to backend stdin: {}", e);
+                    break;
+                }
+                if let Err(e) = stdin_writer.flush().await {
+                    error!("Failed to flush backend stdin: {}", e);
+                    break;
+                }
+            }
+            debug!("Stdin writer task ended");
+        });
+
+        // Spawn task to read backend stdout and dispatch responses
+        let mut reader = BufReader::new(stdout);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => {
+                        debug!("Backend stdout closed (EOF)");
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        
+                        debug!("Backend response: {}", trimmed);
+                        
+                        match serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                            Ok(response) => {
+                                if let Some(ref id) = response.id {
+                                    let proxy_id = match id {
+                                        JsonRpcId::Number(n) => *n as u64,
+                                        JsonRpcId::String(s) => {
+                                            s.parse().unwrap_or(0)
+                                        }
+                                    };
+                                    
+                                    let mut pending_guard = pending_clone.lock().await;
+                                    if let Some(req) = pending_guard.remove(&proxy_id) {
+                                        let mut final_response = response;
+                                        final_response.id = req.client_id;
+                                        
+                                        if req.response_tx.send(final_response).is_err() {
+                                            warn!("Failed to send response - receiver dropped");
+                                        }
+                                    } else {
+                                        warn!("Received response for unknown proxy_id: {}", proxy_id);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse backend response: {} - {}", e, trimmed);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error reading backend stdout: {}", e);
+                        break;
+                    }
+                }
+            }
+            debug!("Stdout reader task ended");
+        });
+
+        Ok(Self {
+            root,
+            state: BackendState::Ready,
+            last_used: Instant::now(),
+            child: Some(child),
+            stdin_tx: Some(stdin_tx),
+            pending,
+            request_timeout: Duration::from_secs(config.request_timeout_seconds),
+            config: config.clone(),
+            process_group_ptr: process_group.map(|pg| pg as *const _),
+        })
+    }
+
+    /// Configure process resources (priority) on Unix
+    #[cfg(unix)]
+    fn configure_process_resources_unix(pid: u32, config: &Config) {
+        use nix::sys::resource::{setpriority, Which};
+        
+        // Set lower priority (higher nice value) if enabled
+        if config.low_priority {
+            // Nice value 10 is "below normal" equivalent
+            match setpriority(Which::Process(nix::unistd::Pid::from_raw(pid as i32)), 10) {
+                Ok(_) => info!("Process {} set to low priority (nice 10)", pid),
+                Err(e) => warn!("Failed to set priority for process {}: {}", pid, e),
+            }
+        }
+        
+        // Note: CPU affinity on macOS requires different APIs (thread_policy_set)
+        // and is more complex. For now, we skip CPU affinity on Unix.
+        if config.cpu_affinity != 0 {
+            #[cfg(target_os = "linux")]
+            {
+                // On Linux, we can use sched_setaffinity
+                warn!("CPU affinity configuration is not yet implemented on Linux");
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // macOS doesn't support process-level CPU affinity in the same way
+                debug!("CPU affinity is not supported on macOS, ignoring");
+            }
+        }
     }
 
     /// Send a request to this backend and wait for response
@@ -405,15 +621,18 @@ impl BackendInstance {
         Ok(())
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     pub async fn restart(&mut self) -> Result<(), ProxyError> {
         info!("Restarting backend for root: {}", self.root.display());
         
         // Shutdown existing process
         self.shutdown().await;
         
+        // Get process group from raw pointer (unsafe but necessary for restart)
+        let process_group = self.process_group_ptr.map(|ptr| unsafe { &*ptr });
+        
         // Respawn
-        let mut new_instance = Self::spawn(&self.config, self.root.clone()).await?;
+        let mut new_instance = Self::spawn(&self.config, self.root.clone(), process_group).await?;
         
         // Take ownership of fields from new instance using std::mem::take
         self.state = new_instance.state;

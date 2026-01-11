@@ -18,6 +18,9 @@ use tracing::{debug, error, info, warn};
 #[cfg(windows)]
 use crate::job_object::JobObject;
 
+#[cfg(unix)]
+use crate::process_group::ProcessGroup;
+
 /// MCP Proxy managing communication between IDE and backend(s)
 pub struct McpProxy {
     config: Config,
@@ -30,6 +33,9 @@ pub struct McpProxy {
     /// Windows Job Object for process cleanup
     #[cfg(windows)]
     job_object: Option<JobObject>,
+    /// Unix ProcessGroup for process cleanup
+    #[cfg(unix)]
+    process_group: Option<ProcessGroup>,
     /// Server capabilities to report
     server_capabilities: serde_json::Value,
     /// Whether we're shutting down
@@ -54,6 +60,16 @@ impl McpProxy {
             Ok(job) => Some(job),
             Err(e) => {
                 warn!("Failed to create Job Object: {}. Process cleanup may not work correctly.", e);
+                None
+            }
+        };
+
+        // Create ProcessGroup on Unix
+        #[cfg(unix)]
+        let process_group = match ProcessGroup::new() {
+            Ok(pg) => Some(pg),
+            Err(e) => {
+                warn!("Failed to create ProcessGroup: {}. Process cleanup may not work correctly.", e);
                 None
             }
         };
@@ -93,6 +109,8 @@ impl McpProxy {
             default_root,
             #[cfg(windows)]
             job_object,
+            #[cfg(unix)]
+            process_group,
             server_capabilities,
             shutting_down: false,
             global_inflight,
@@ -420,8 +438,12 @@ impl McpProxy {
                 self.job_object.as_ref(),
             ).await?;
             
-            #[cfg(not(windows))]
-            let backend = BackendInstance::spawn(&self.config, root.clone()).await?;
+            #[cfg(unix)]
+            let backend = BackendInstance::spawn(
+                &self.config,
+                root.clone(),
+                self.process_group.as_ref(),
+            ).await?;
             
             self.backends.insert(root.clone(), backend);
         }

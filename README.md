@@ -2,15 +2,18 @@
 
 Rust 实现的 MCP 代理，用于管理 Auggie 后端实例的生命周期，解决进程残留和 CPU 占用问题。
 
+**支持平台**: Windows / macOS (Intel & Apple Silicon)
+
 ## 功能特性
 
-- **单实例锁**: 全局 Mutex 确保只有一个 proxy 实例运行
+- **跨平台支持**: 支持 Windows 和 macOS（Intel/Apple Silicon）
+- **单实例锁**: 全局锁确保只有一个 proxy 实例运行（Windows: Mutex, macOS: flock）
 - **多 workspace 支持**: 按需为不同 workspace root 启动后端
-- **进程治理**: Windows Job Object 确保退出时自动清理所有子进程
+- **进程治理**: 退出时自动清理所有子进程（Windows: Job Object, macOS: ProcessGroup）
 - **资源管理**: LRU 淘汰 + 空闲回收，限制后端数量
 - **事件节流**: 文件变更通知合并去重，防止 CPU 风暴
 - **Git 过滤**: 只处理 git 跟踪的文件，自动排除 node_modules
-- **资源限制**: 支持设置后端进程优先级和 CPU 亲和性
+- **资源限制**: 支持设置后端进程优先级（macOS 不支持 CPU 亲和性）
 - **配置文件**: 支持 JSON 配置文件，简化部署
 - **自动检测**: 自动检测 Node.js 和 Auggie 安装路径
 
@@ -27,7 +30,16 @@ Rust 实现的 MCP 代理，用于管理 Auggie 后端实例的生命周期，�
 cargo build --release
 ```
 
-生成的可执行文件位于 `target/release/mcp-proxy.exe`
+生成的可执行文件位于：
+- Windows: `target/release/mcp-proxy.exe`
+- macOS: `target/release/mcp-proxy`
+
+### 预编译二进制
+
+从 [GitHub Releases](../../releases) 下载对应平台的预编译文件：
+- `mcp-proxy.exe` - Windows x64
+- `mcp-proxy-macos-x64` - macOS Intel
+- `mcp-proxy-macos-arm64` - macOS Apple Silicon
 
 ## 快速开始
 
@@ -35,12 +47,25 @@ cargo build --release
 
 MCP 配置（Windsurf / VS Code）：
 
+**Windows:**
 ```json
 {
   "mcpServers": {
     "augment-context-engine": {
       "args": ["--default-root", "E:\\your-project"],
       "command": "path/to/mcp-proxy.exe"
+    }
+  }
+}
+```
+
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "args": ["--default-root", "/Users/yourname/your-project"],
+      "command": "/path/to/mcp-proxy-macos-arm64"
     }
   }
 }
@@ -93,10 +118,18 @@ MCP 配置简化为：
 ### 配置文件
 
 配置文件搜索顺序：
+
+**Windows:**
 1. exe 同目录 `mcp-proxy.json`
 2. 当前工作目录 `mcp-proxy.json`
 3. `%USERPROFILE%\.config\mcp-proxy.json`
 4. `%USERPROFILE%\mcp-proxy.json`
+
+**macOS:**
+1. 可执行文件同目录 `mcp-proxy.json`
+2. 当前工作目录 `mcp-proxy.json`
+3. `~/.config/mcp-proxy.json`
+4. `~/.mcp-proxy.json`
 
 配置优先级：**命令行参数 > 环境变量 > 配置文件 > 自动检测**
 
@@ -127,10 +160,10 @@ IDE <─stdio─> MCP Proxy <───> Backend Pool
                   │               ├── auggie (workspace B)
                   │               └── auggie (workspace C)
                   │
-                  ├── 单实例锁 (Global Mutex)
+                  ├── 单实例锁 (Windows: Mutex / macOS: flock)
                   ├── 事件节流器
                   ├── Git 文件过滤
-                  └── Windows Job Object (进程清理)
+                  └── 进程清理 (Windows: Job Object / macOS: ProcessGroup)
 ```
 
 ## 性能优化建议
