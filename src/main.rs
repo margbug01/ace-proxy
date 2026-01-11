@@ -78,9 +78,6 @@ impl Drop for SingleInstanceLock {
 
 #[cfg(unix)]
 fn acquire_single_instance_lock() -> Result<SingleInstanceLock> {
-    use nix::fcntl::{Flock, FlockArg};
-    use std::os::unix::io::AsFd;
-    
     let lock_path = std::env::var("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".mcp-proxy.lock"))
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/mcp-proxy.lock"));
@@ -91,12 +88,19 @@ fn acquire_single_instance_lock() -> Result<SingleInstanceLock> {
         .mode(0o600)
         .open(&lock_path)?;
     
-    match Flock::lock(file.as_fd().try_clone_to_owned()?, FlockArg::LockExclusiveNonblock) {
-        Ok(_) => Ok(SingleInstanceLock { _file: file, path: lock_path }),
-        Err(nix::errno::Errno::EWOULDBLOCK) => {
+    // Use libc flock directly for simpler API
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    
+    if result == 0 {
+        Ok(SingleInstanceLock { _file: file, path: lock_path })
+    } else {
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() == Some(libc::EWOULDBLOCK) {
             anyhow::bail!("mcp-proxy is already running (lock file: {})", lock_path.display());
+        } else {
+            anyhow::bail!("Failed to acquire lock: {}", errno);
         }
-        Err(e) => anyhow::bail!("Failed to acquire lock: {}", e),
     }
 }
 

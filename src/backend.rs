@@ -418,14 +418,15 @@ impl BackendInstance {
     /// Configure process resources (priority) on Unix
     #[cfg(unix)]
     fn configure_process_resources_unix(pid: u32, config: &Config) {
-        use nix::sys::resource::{setpriority, Which};
-        
         // Set lower priority (higher nice value) if enabled
         if config.low_priority {
-            // Nice value 10 is "below normal" equivalent
-            match setpriority(Which::Process(nix::unistd::Pid::from_raw(pid as i32)), 10) {
-                Ok(_) => info!("Process {} set to low priority (nice 10)", pid),
-                Err(e) => warn!("Failed to set priority for process {}: {}", pid, e),
+            // Use libc setpriority directly - nice value 10 is "below normal" equivalent
+            let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, 10) };
+            if result == 0 {
+                info!("Process {} set to low priority (nice 10)", pid);
+            } else {
+                let err = std::io::Error::last_os_error();
+                warn!("Failed to set priority for process {}: {}", pid, err);
             }
         }
         
@@ -434,12 +435,10 @@ impl BackendInstance {
         if config.cpu_affinity != 0 {
             #[cfg(target_os = "linux")]
             {
-                // On Linux, we can use sched_setaffinity
                 warn!("CPU affinity configuration is not yet implemented on Linux");
             }
             #[cfg(target_os = "macos")]
             {
-                // macOS doesn't support process-level CPU affinity in the same way
                 debug!("CPU affinity is not supported on macOS, ignoring");
             }
         }
