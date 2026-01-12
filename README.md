@@ -7,6 +7,7 @@ Rust 实现的 MCP 代理，用于管理 Auggie 后端实例的生命周期，�
 ## 功能特性
 
 - **跨平台支持**: 支持 Windows、macOS（Intel/Apple Silicon）和 Linux
+- **自动识别 workspace**: 自动从文件路径向上查找 git 根目录，无需手动配置
 - **单实例锁**: 全局锁确保只有一个 proxy 实例运行（Windows: Mutex, Unix: flock）
 - **多 workspace 支持**: 按需为不同 workspace root 启动后端
 - **进程治理**: 退出时自动清理所有子进程（Windows: Job Object, Unix: ProcessGroup）
@@ -44,7 +45,7 @@ cargo build --release
 
 ## 快速开始
 
-### 最简配置
+### 最简配置（推荐）
 
 MCP 配置（Windsurf / VS Code）：
 
@@ -53,7 +54,6 @@ MCP 配置（Windsurf / VS Code）：
 {
   "mcpServers": {
     "augment-context-engine": {
-      "args": ["--default-root", "E:\\your-project"],
       "command": "path/to/mcp-proxy.exe"
     }
   }
@@ -65,7 +65,6 @@ MCP 配置（Windsurf / VS Code）：
 {
   "mcpServers": {
     "augment-context-engine": {
-      "args": ["--default-root", "/Users/yourname/your-project"],
       "command": "/path/to/mcp-proxy-macos-arm64"
     }
   }
@@ -77,58 +76,38 @@ MCP 配置（Windsurf / VS Code）：
 {
   "mcpServers": {
     "augment-context-engine": {
-      "args": ["--default-root", "/home/yourname/your-project"],
       "command": "/path/to/mcp-proxy-linux-x64"
     }
   }
 }
 ```
 
-程序会自动检测 Node.js 和 Auggie 路径。
+程序会**自动检测** Node.js、Auggie 路径，以及**自动识别 git 仓库根目录**。切换项目无需修改配置。
 
-### 带 Augment 登录环境变量
+### 手动指定默认根目录（可选）
 
-如果需要配置 Augment API 认证：
+如果需要指定默认的 workspace 根目录：
 
-**Windows:**
 ```json
 {
   "mcpServers": {
     "augment-context-engine": {
       "command": "path/to/mcp-proxy.exe",
-      "args": ["--default-root", "E:\\your-project"],
-      "env": {
-        "AUGMENT_API_TOKEN": "your-access-token",
-        "AUGMENT_API_URL": "your-tenant-url"
-      }
+      "args": ["--default-root", "E:\\your-project"]
     }
   }
 }
 ```
 
-**macOS:**
-```json
-{
-  "mcpServers": {
-    "augment-context-engine": {
-      "command": "/path/to/mcp-proxy-macos-arm64",
-      "args": ["--default-root", "/Users/yourname/your-project"],
-      "env": {
-        "AUGMENT_API_TOKEN": "your-access-token",
-        "AUGMENT_API_URL": "your-tenant-url"
-      }
-    }
-  }
-}
-```
+### 带 Augment 登录环境变量
 
-**Linux:**
+如果需要配置 Augment API 认证：
+
 ```json
 {
   "mcpServers": {
     "augment-context-engine": {
-      "command": "/path/to/mcp-proxy-linux-x64",
-      "args": ["--default-root", "/home/yourname/your-project"],
+      "command": "path/to/mcp-proxy",
       "env": {
         "AUGMENT_API_TOKEN": "your-access-token",
         "AUGMENT_API_URL": "your-tenant-url"

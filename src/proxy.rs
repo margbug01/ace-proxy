@@ -8,7 +8,7 @@ use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::throttle::EventThrottler;
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -409,11 +409,39 @@ impl McpProxy {
                 if let Some(root) = matched {
                     return Some(root.clone());
                 }
+                
+                // Auto-detect git root from file path
+                if let Some(git_root) = Self::find_git_root(&path) {
+                    info!("Auto-detected git root: {}", git_root.display());
+                    return Some(git_root);
+                }
             }
         }
 
         // Fall back to default root
         self.default_root.clone()
+    }
+    
+    /// Find git root by walking up from the given path
+    fn find_git_root(path: &Path) -> Option<PathBuf> {
+        let mut current = if path.is_file() {
+            path.parent()?.to_path_buf()
+        } else {
+            path.to_path_buf()
+        };
+        
+        loop {
+            let git_dir = current.join(".git");
+            if git_dir.exists() {
+                return Some(current);
+            }
+            
+            if !current.pop() {
+                break;
+            }
+        }
+        
+        None
     }
 
     /// Get existing backend or create new one for the given root
