@@ -412,14 +412,23 @@ impl McpProxy {
                 
                 // Auto-detect git root from file path
                 if let Some(git_root) = Self::find_git_root(&path) {
-                    info!("Auto-detected git root: {}", git_root.display());
+                    info!("Auto-detected git root from URI: {}", git_root.display());
                     return Some(git_root);
                 }
             }
         }
 
-        // Fall back to default root
-        self.default_root.clone()
+        // Fall back to default root if configured
+        if let Some(ref root) = self.default_root {
+            return Some(root.clone());
+        }
+        
+        // Fall back to first known root
+        if !self.roots.is_empty() {
+            return Some(self.roots[0].clone());
+        }
+        
+        None
     }
     
     /// Find git root by walking up from the given path

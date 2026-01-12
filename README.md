@@ -7,7 +7,7 @@ Rust 实现的 MCP 代理，用于管理 Auggie 后端实例的生命周期，�
 ## 功能特性
 
 - **跨平台支持**: 支持 Windows、macOS（Intel/Apple Silicon）和 Linux
-- **自动识别 workspace**: 自动从文件路径向上查找 git 根目录，无需手动配置
+- **自动识别 workspace**: 当请求包含文件URI时，自动从文件路径向上查找 git 根目录
 - **单实例锁**: 全局锁确保只有一个 proxy 实例运行（Windows: Mutex, Unix: flock）
 - **多 workspace 支持**: 按需为不同 workspace root 启动后端
 - **进程治理**: 退出时自动清理所有子进程（Windows: Job Object, Unix: ProcessGroup）
@@ -45,49 +45,11 @@ cargo build --release
 
 ## 快速开始
 
-### 最简配置（推荐）
+### 基本配置
 
 MCP 配置（Windsurf / VS Code）：
 
 **Windows:**
-```json
-{
-  "mcpServers": {
-    "augment-context-engine": {
-      "command": "path/to/mcp-proxy.exe"
-    }
-  }
-}
-```
-
-**macOS:**
-```json
-{
-  "mcpServers": {
-    "augment-context-engine": {
-      "command": "/path/to/mcp-proxy-macos-arm64"
-    }
-  }
-}
-```
-
-**Linux:**
-```json
-{
-  "mcpServers": {
-    "augment-context-engine": {
-      "command": "/path/to/mcp-proxy-linux-x64"
-    }
-  }
-}
-```
-
-程序会**自动检测** Node.js、Auggie 路径，以及**自动识别 git 仓库根目录**。切换项目无需修改配置。
-
-### 手动指定默认根目录（可选）
-
-如果需要指定默认的 workspace 根目录：
-
 ```json
 {
   "mcpServers": {
@@ -99,6 +61,34 @@ MCP 配置（Windsurf / VS Code）：
 }
 ```
 
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "command": "/path/to/mcp-proxy-macos-arm64",
+      "args": ["--default-root", "/Users/yourname/your-project"]
+    }
+  }
+}
+```
+
+**Linux:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "command": "/path/to/mcp-proxy-linux-x64",
+      "args": ["--default-root", "/home/yourname/your-project"]
+    }
+  }
+}
+```
+
+> **注意**: `--default-root` 参数是必需的，用于指定默认的 workspace 根目录。当请求包含文件路径时，程序会自动检测对应的 git 根目录。
+
+程序会**自动检测** Node.js 和 Auggie 安装路径。
+
 ### 带 Augment 登录环境变量
 
 如果需要配置 Augment API 认证：
@@ -108,6 +98,7 @@ MCP 配置（Windsurf / VS Code）：
   "mcpServers": {
     "augment-context-engine": {
       "command": "path/to/mcp-proxy",
+      "args": ["--default-root", "/path/to/your-project"],
       "env": {
         "AUGMENT_API_TOKEN": "your-access-token",
         "AUGMENT_API_URL": "your-tenant-url"
