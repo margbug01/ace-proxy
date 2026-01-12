@@ -66,8 +66,28 @@ jobs:
           name: mcp-proxy-macos-arm
           path: target/release/mcp-proxy-macos-arm64
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Release
+        run: cargo build --release
+      
+      - name: Rename binary
+        run: mv target/release/mcp-proxy target/release/mcp-proxy-linux-x64
+      
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-proxy-linux
+          path: target/release/mcp-proxy-linux-x64
+
   release:
-    needs: [build-windows, build-macos-intel, build-macos-arm]
+    needs: [build-windows, build-macos-intel, build-macos-arm, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -81,7 +101,8 @@ jobs:
           cp artifacts/mcp-proxy-windows/mcp-proxy.exe release/
           cp artifacts/mcp-proxy-macos-intel/mcp-proxy-macos-x64 release/
           cp artifacts/mcp-proxy-macos-arm/mcp-proxy-macos-arm64 release/
-          chmod +x release/mcp-proxy-macos-*
+          cp artifacts/mcp-proxy-linux/mcp-proxy-linux-x64 release/
+          chmod +x release/mcp-proxy-macos-* release/mcp-proxy-linux-*
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -90,4 +111,5 @@ jobs:
             release/mcp-proxy.exe
             release/mcp-proxy-macos-x64
             release/mcp-proxy-macos-arm64
+            release/mcp-proxy-linux-x64
           generate_release_notes: true

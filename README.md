@@ -2,14 +2,14 @@
 
 Rust 实现的 MCP 代理，用于管理 Auggie 后端实例的生命周期，解决进程残留和 CPU 占用问题。
 
-**支持平台**: Windows / macOS (Intel & Apple Silicon)
+**支持平台**: Windows / macOS (Intel & Apple Silicon) / Linux
 
 ## 功能特性
 
-- **跨平台支持**: 支持 Windows 和 macOS（Intel/Apple Silicon）
-- **单实例锁**: 全局锁确保只有一个 proxy 实例运行（Windows: Mutex, macOS: flock）
+- **跨平台支持**: 支持 Windows、macOS（Intel/Apple Silicon）和 Linux
+- **单实例锁**: 全局锁确保只有一个 proxy 实例运行（Windows: Mutex, Unix: flock）
 - **多 workspace 支持**: 按需为不同 workspace root 启动后端
-- **进程治理**: 退出时自动清理所有子进程（Windows: Job Object, macOS: ProcessGroup）
+- **进程治理**: 退出时自动清理所有子进程（Windows: Job Object, Unix: ProcessGroup）
 - **资源管理**: LRU 淘汰 + 空闲回收，限制后端数量
 - **事件节流**: 文件变更通知合并去重，防止 CPU 风暴
 - **Git 过滤**: 只处理 git 跟踪的文件，自动排除 node_modules
@@ -40,6 +40,7 @@ cargo build --release
 - `mcp-proxy.exe` - Windows x64
 - `mcp-proxy-macos-x64` - macOS Intel
 - `mcp-proxy-macos-arm64` - macOS Apple Silicon
+- `mcp-proxy-linux-x64` - Linux x64
 
 ## 快速开始
 
@@ -66,6 +67,18 @@ MCP 配置（Windsurf / VS Code）：
     "augment-context-engine": {
       "args": ["--default-root", "/Users/yourname/your-project"],
       "command": "/path/to/mcp-proxy-macos-arm64"
+    }
+  }
+}
+```
+
+**Linux:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "args": ["--default-root", "/home/yourname/your-project"],
+      "command": "/path/to/mcp-proxy-linux-x64"
     }
   }
 }
@@ -100,6 +113,22 @@ MCP 配置（Windsurf / VS Code）：
     "augment-context-engine": {
       "command": "/path/to/mcp-proxy-macos-arm64",
       "args": ["--default-root", "/Users/yourname/your-project"],
+      "env": {
+        "AUGMENT_API_TOKEN": "your-access-token",
+        "AUGMENT_API_URL": "your-tenant-url"
+      }
+    }
+  }
+}
+```
+
+**Linux:**
+```json
+{
+  "mcpServers": {
+    "augment-context-engine": {
+      "command": "/path/to/mcp-proxy-linux-x64",
+      "args": ["--default-root", "/home/yourname/your-project"],
       "env": {
         "AUGMENT_API_TOKEN": "your-access-token",
         "AUGMENT_API_URL": "your-tenant-url"
@@ -161,7 +190,7 @@ MCP 配置简化为：
 3. `%USERPROFILE%\.config\mcp-proxy.json`
 4. `%USERPROFILE%\mcp-proxy.json`
 
-**macOS:**
+**macOS/Linux:**
 1. 可执行文件同目录 `mcp-proxy.json`
 2. 当前工作目录 `mcp-proxy.json`
 3. `~/.config/mcp-proxy.json`
@@ -196,10 +225,10 @@ IDE <─stdio─> MCP Proxy <───> Backend Pool
                   │               ├── auggie (workspace B)
                   │               └── auggie (workspace C)
                   │
-                  ├── 单实例锁 (Windows: Mutex / macOS: flock)
+                  ├── 单实例锁 (Windows: Mutex / Unix: flock)
                   ├── 事件节流器
                   ├── Git 文件过滤
-                  └── 进程清理 (Windows: Job Object / macOS: ProcessGroup)
+                  └── 进程清理 (Windows: Job Object / Unix: ProcessGroup)
 ```
 
 ## 性能优化建议
