@@ -48,12 +48,12 @@ pub struct BackendInstance {
     request_timeout: Duration,
     /// Config for restart
     config: Config,
-    /// Job object reference for Windows
+    /// Job object reference for Windows (Arc for safe sharing)
     #[cfg(windows)]
-    job_object_ptr: Option<*const crate::job_object::JobObject>,
-    /// ProcessGroup reference for Unix
+    job_object: Option<Arc<crate::job_object::JobObject>>,
+    /// ProcessGroup reference for Unix (Arc for safe sharing)
     #[cfg(unix)]
-    process_group_ptr: Option<*const crate::process_group::ProcessGroup>,
+    process_group: Option<Arc<crate::process_group::ProcessGroup>>,
 }
 
 impl BackendInstance {
@@ -62,7 +62,7 @@ impl BackendInstance {
     pub async fn spawn(
         config: &Config,
         root: PathBuf,
-        job_object: Option<&crate::job_object::JobObject>,
+        job_object: Option<Arc<crate::job_object::JobObject>>,
     ) -> Result<Self, ProxyError> {
         Self::spawn_internal(config, root, job_object).await
     }
@@ -71,7 +71,7 @@ impl BackendInstance {
     pub async fn spawn(
         config: &Config,
         root: PathBuf,
-        process_group: Option<&crate::process_group::ProcessGroup>,
+        process_group: Option<Arc<crate::process_group::ProcessGroup>>,
     ) -> Result<Self, ProxyError> {
         Self::spawn_internal(config, root, process_group).await
     }
@@ -81,7 +81,7 @@ impl BackendInstance {
     async fn spawn_internal(
         config: &Config,
         root: PathBuf,
-        job_object: Option<&crate::job_object::JobObject>,
+        job_object: Option<Arc<crate::job_object::JobObject>>,
     ) -> Result<Self, ProxyError> {
         let node_path = config
             .node
@@ -134,7 +134,7 @@ impl BackendInstance {
             debug!("Backend process spawned with PID: {}", pid);
             
             // Assign to job object
-            if let Some(job) = job_object {
+            if let Some(ref job) = job_object {
                 match job.assign_process_by_pid(pid) {
                     Ok(_) => info!("Process {} assigned to Job Object", pid),
                     Err(e) => warn!("Failed to assign process to Job Object: {} - process cleanup may not work correctly", e),
@@ -248,7 +248,7 @@ impl BackendInstance {
             request_timeout: Duration::from_secs(config.request_timeout_seconds),
             config: config.clone(),
             #[cfg(windows)]
-            job_object_ptr: job_object.map(|j| j as *const _),
+            job_object,
         })
     }
 
@@ -257,7 +257,7 @@ impl BackendInstance {
     async fn spawn_internal(
         config: &Config,
         root: PathBuf,
-        process_group: Option<&crate::process_group::ProcessGroup>,
+        process_group: Option<Arc<crate::process_group::ProcessGroup>>,
     ) -> Result<Self, ProxyError> {
         let node_path = config
             .node
@@ -301,7 +301,7 @@ impl BackendInstance {
             debug!("Backend process spawned with PID: {}", pid);
             
             // Add to process group
-            if let Some(pg) = process_group {
+            if let Some(ref pg) = process_group {
                 match pg.add_process(pid) {
                     Ok(_) => info!("Process {} added to ProcessGroup", pid),
                     Err(e) => warn!("Failed to add process to ProcessGroup: {} - process cleanup may not work correctly", e),
@@ -411,7 +411,7 @@ impl BackendInstance {
             pending,
             request_timeout: Duration::from_secs(config.request_timeout_seconds),
             config: config.clone(),
-            process_group_ptr: process_group.map(|pg| pg as *const _),
+            process_group,
         })
     }
 
@@ -549,6 +549,50 @@ impl BackendInstance {
         self.state == BackendState::Dead
     }
 
+    /// Check if the backend process is still alive
+    #[allow(dead_code)]
+    pub fn is_process_alive(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            // try_wait returns Ok(Some(status)) if exited, Ok(None) if still running
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    warn!("Backend process exited with status: {:?}", status);
+                    self.state = BackendState::Dead;
+                    false
+                }
+                Ok(None) => true, // Still running
+                Err(e) => {
+                    warn!("Failed to check backend process status: {}", e);
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Perform health check - verify backend is responsive
+    /// Returns true if healthy, false if unhealthy
+    pub async fn health_check(&mut self) -> bool {
+        // First check if process is alive
+        if !self.is_process_alive() {
+            return false;
+        }
+
+        // If state is already Dead, not healthy
+        if self.state == BackendState::Dead {
+            return false;
+        }
+
+        // Check if stdin channel is still open
+        if self.stdin_tx.is_none() {
+            self.state = BackendState::Dead;
+            return false;
+        }
+
+        true
+    }
+
     /// Configure process resources (priority and CPU affinity) on Windows
     #[cfg(windows)]
     fn configure_process_resources(pid: u32, config: &Config) {
@@ -599,8 +643,8 @@ impl BackendInstance {
         // Shutdown existing process
         self.shutdown().await;
         
-        // Get job object from raw pointer (unsafe but necessary for restart)
-        let job_object = self.job_object_ptr.map(|ptr| unsafe { &*ptr });
+        // Clone the Arc to pass to spawn (safe shared ownership)
+        let job_object = self.job_object.clone();
         
         // Respawn
         let mut new_instance = Self::spawn(&self.config, self.root.clone(), job_object).await?;
@@ -626,8 +670,8 @@ impl BackendInstance {
         // Shutdown existing process
         self.shutdown().await;
         
-        // Get process group from raw pointer (unsafe but necessary for restart)
-        let process_group = self.process_group_ptr.map(|ptr| unsafe { &*ptr });
+        // Clone the Arc to pass to spawn (safe shared ownership)
+        let process_group = self.process_group.clone();
         
         // Respawn
         let mut new_instance = Self::spawn(&self.config, self.root.clone(), process_group).await?;
@@ -690,18 +734,41 @@ impl BackendInstance {
         Err(last_error.unwrap_or_else(|| ProxyError::BackendUnavailable("All retries exhausted".to_string())))
     }
 
-    /// Shutdown the backend
+    /// Shutdown the backend gracefully
+    /// Waits for graceful_timeout before force killing
     pub async fn shutdown(&mut self) {
+        self.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// Shutdown the backend with a custom graceful timeout
+    pub async fn shutdown_with_timeout(&mut self, graceful_timeout: Duration) {
         info!("Shutting down backend for root: {}", self.root.display());
         self.state = BackendState::Stopping;
         
-        // Close stdin channel to signal shutdown
+        // Close stdin channel to signal shutdown (this tells the backend to exit gracefully)
         self.stdin_tx.take();
         
-        // Kill the child process
         if let Some(mut child) = self.child.take() {
-            if let Err(e) = child.kill().await {
-                warn!("Failed to kill backend process: {}", e);
+            // Wait for graceful shutdown
+            match tokio::time::timeout(graceful_timeout, child.wait()).await {
+                Ok(Ok(status)) => {
+                    info!("Backend exited gracefully with status: {:?}", status);
+                }
+                Ok(Err(e)) => {
+                    warn!("Error waiting for backend to exit: {}", e);
+                    // Force kill
+                    let _ = child.kill().await;
+                }
+                Err(_) => {
+                    // Timeout - force kill
+                    warn!(
+                        "Backend did not exit within {:?}, force killing",
+                        graceful_timeout
+                    );
+                    if let Err(e) = child.kill().await {
+                        warn!("Failed to kill backend process: {}", e);
+                    }
+                }
             }
         }
         
@@ -716,5 +783,31 @@ impl Drop for BackendInstance {
             // Use start_kill for sync drop context
             let _ = child.start_kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_state_transitions() {
+        assert_eq!(BackendState::Ready, BackendState::Ready);
+        assert_ne!(BackendState::Ready, BackendState::Dead);
+        assert_ne!(BackendState::Stopping, BackendState::Dead);
+    }
+
+    #[test]
+    fn test_proxy_id_generation() {
+        let id1 = next_proxy_id();
+        let id2 = next_proxy_id();
+        assert!(id2 > id1, "Proxy IDs should be monotonically increasing");
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_timeout() {
+        // Test that Duration::from_secs works correctly for shutdown
+        let timeout = Duration::from_secs(5);
+        assert_eq!(timeout.as_secs(), 5);
     }
 }

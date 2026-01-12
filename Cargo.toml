@@ -30,6 +30,9 @@ thiserror = "1"
 # URL decoding
 percent-encoding = "2"
 
+# LRU cache for backend management
+lru = "0.12"
+
 # Windows-specific dependencies
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

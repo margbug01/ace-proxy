@@ -143,27 +143,6 @@ impl JsonRpcRequest {
     }
 }
 
-/// Generic JSON-RPC message (can be request, response, or notification)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum JsonRpcMessage {
-    Request(JsonRpcRequest),
-    Response(JsonRpcResponse),
-}
-
-impl JsonRpcMessage {
-    #[allow(dead_code)]
-    pub fn parse(line: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(line)
-    }
-
-    #[allow(dead_code)]
-    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

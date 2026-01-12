@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 /// Git tracked files cache with optimized lookup
@@ -75,15 +75,15 @@ impl GitTrackedFiles {
     }
 }
 
-/// Get list of git-tracked files for a workspace root
-pub fn get_git_tracked_files(root: &Path) -> Option<GitTrackedFiles> {
+/// Get list of git-tracked files for a workspace root (async version)
+pub async fn get_git_tracked_files(root: &Path) -> Option<GitTrackedFiles> {
     // Check if this is a git repository
     if !root.join(".git").exists() {
         debug!("Not a git repository: {}", root.display());
         return None;
     }
 
-    // Run git ls-files
+    // Run git ls-files asynchronously
     let output = match Command::new("git")
         .arg("ls-files")
         .arg("--cached")
@@ -91,6 +91,7 @@ pub fn get_git_tracked_files(root: &Path) -> Option<GitTrackedFiles> {
         .arg("--exclude-standard")
         .current_dir(root)
         .output()
+        .await
     {
         Ok(o) => o,
         Err(e) => {

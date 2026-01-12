@@ -6,8 +6,10 @@ use crate::error::{ProxyError, ERROR_BACKEND_SPAWN_FAILED, ERROR_BACKEND_UNAVAIL
 use crate::git_filter::{self, GitTrackedFiles};
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::throttle::EventThrottler;
+use lru::LruCache;
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,16 +28,16 @@ pub struct McpProxy {
     config: Config,
     /// Known workspace roots from IDE
     roots: Vec<PathBuf>,
-    /// Backend instances by root path
-    backends: HashMap<PathBuf, BackendInstance>,
+    /// Backend instances managed by LRU cache (automatically evicts least recently used)
+    backends: LruCache<PathBuf, BackendInstance>,
     /// Default/fallback root when routing fails
     default_root: Option<PathBuf>,
-    /// Windows Job Object for process cleanup
+    /// Windows Job Object for process cleanup (Arc for sharing with backends)
     #[cfg(windows)]
-    job_object: Option<JobObject>,
-    /// Unix ProcessGroup for process cleanup
+    job_object: Option<Arc<JobObject>>,
+    /// Unix ProcessGroup for process cleanup (Arc for sharing with backends)
     #[cfg(unix)]
-    process_group: Option<ProcessGroup>,
+    process_group: Option<Arc<ProcessGroup>>,
     /// Server capabilities to report
     server_capabilities: serde_json::Value,
     /// Whether we're shutting down
@@ -48,6 +50,12 @@ pub struct McpProxy {
     git_tracked_cache: HashMap<PathBuf, GitTrackedFiles>,
     /// Git cache timestamps for TTL
     git_cache_timestamps: HashMap<PathBuf, Instant>,
+    /// Metrics: total requests processed
+    metrics_total_requests: u64,
+    /// Metrics: total errors
+    metrics_total_errors: u64,
+    /// Metrics: start time for uptime calculation
+    metrics_start_time: Instant,
 }
 
 impl McpProxy {
@@ -57,7 +65,7 @@ impl McpProxy {
         // Create Job Object on Windows
         #[cfg(windows)]
         let job_object = match JobObject::new() {
-            Ok(job) => Some(job),
+            Ok(job) => Some(Arc::new(job)),
             Err(e) => {
                 warn!("Failed to create Job Object: {}. Process cleanup may not work correctly.", e);
                 None
@@ -67,7 +75,7 @@ impl McpProxy {
         // Create ProcessGroup on Unix
         #[cfg(unix)]
         let process_group = match ProcessGroup::new() {
-            Ok(pg) => Some(pg),
+            Ok(pg) => Some(Arc::new(pg)),
             Err(e) => {
                 warn!("Failed to create ProcessGroup: {}. Process cleanup may not work correctly.", e);
                 None
@@ -102,10 +110,15 @@ impl McpProxy {
             None
         };
 
+        // Create LRU cache for backends with configured max capacity
+        let backends_capacity = NonZeroUsize::new(config.max_backends.max(1))
+            .unwrap_or(NonZeroUsize::new(3).unwrap());
+        info!("Backend LRU cache initialized with capacity: {}", backends_capacity);
+
         Ok(Self {
             config,
             roots: Vec::new(),
-            backends: HashMap::new(),
+            backends: LruCache::new(backends_capacity),
             default_root,
             #[cfg(windows)]
             job_object,
@@ -117,6 +130,9 @@ impl McpProxy {
             event_throttler,
             git_tracked_cache: HashMap::new(),
             git_cache_timestamps: HashMap::new(),
+            metrics_total_requests: 0,
+            metrics_total_errors: 0,
+            metrics_start_time: Instant::now(),
         })
     }
 
@@ -226,6 +242,9 @@ impl McpProxy {
         };
 
         info!("Handling request: {} (id: {:?})", request.method, request.id);
+        
+        // Record metrics
+        self.record_request();
 
         // Handle protocol-level messages
         if request.is_initialize() {
@@ -255,7 +274,7 @@ impl McpProxy {
                     if let Some(path) = Self::uri_to_path(&uri) {
                         // Apply git filter if enabled
                         if self.config.git_filter {
-                            if !self.is_path_git_tracked(&path) {
+                            if !self.is_path_git_tracked(&path).await {
                                 debug!("Ignoring non-git-tracked file: {}", path.display());
                                 return Ok(None);
                             }
@@ -272,12 +291,19 @@ impl McpProxy {
             // Forward non-throttled notifications directly
             if let Err(e) = self.forward_notification_to_backend(request).await {
                 warn!("Failed to forward notification: {}", e);
+                self.record_error();
             }
             return Ok(None);
         }
 
         // Route to backend
-        let response = self.route_to_backend(request).await?;
+        let response = match self.route_to_backend(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.record_error();
+                return Err(e);
+            }
+        };
         Ok(Some(response))
     }
 
@@ -302,7 +328,7 @@ impl McpProxy {
         // Optionally pre-spawn backend for default root during initialize
         if self.config.prewarm_default_root {
             if let Some(ref root) = self.default_root.clone() {
-                if !self.backends.contains_key(root) {
+                if !self.backends.contains(root) {
                     info!("Pre-spawning backend for default root: {}", root.display());
                     match self.get_or_create_backend(root.clone()).await {
                         Ok(_) => info!("Backend ready for default root"),
@@ -455,8 +481,11 @@ impl McpProxy {
 
     /// Get existing backend or create new one for the given root
     async fn get_or_create_backend(&mut self, root: PathBuf) -> Result<&mut BackendInstance, ProxyError> {
-        // Check if we need to evict backends (LRU)
-        while self.backends.len() >= self.config.max_backends {
+        // LRU cache handles eviction automatically when capacity is exceeded
+        // But we need to ensure evicted backends are properly shut down
+        // Check if we need to make room (LRU will auto-evict, but we want graceful shutdown)
+        if self.backends.len() >= self.backends.cap().get() && !self.backends.contains(&root) {
+            // Evict LRU backend gracefully before LRU auto-evicts
             if !self.evict_lru_backend().await {
                 return Err(ProxyError::BackendUnavailable(
                     "All backends are busy (pending requests), cannot evict LRU".to_string(),
@@ -465,41 +494,46 @@ impl McpProxy {
         }
 
         // Create backend if it doesn't exist
-        if !self.backends.contains_key(&root) {
+        if !self.backends.contains(&root) {
             info!("Creating new backend for root: {}", root.display());
             
             #[cfg(windows)]
             let backend = BackendInstance::spawn(
                 &self.config,
                 root.clone(),
-                self.job_object.as_ref(),
+                self.job_object.clone(),
             ).await?;
             
             #[cfg(unix)]
             let backend = BackendInstance::spawn(
                 &self.config,
                 root.clone(),
-                self.process_group.as_ref(),
+                self.process_group.clone(),
             ).await?;
             
-            self.backends.insert(root.clone(), backend);
+            // put() returns the evicted entry if any (but we already handled eviction above)
+            self.backends.put(root.clone(), backend);
         }
 
+        // get() promotes to most recently used
         Ok(self.backends.get_mut(&root).unwrap())
     }
 
-    /// Evict the least recently used backend
+    /// Evict the least recently used backend (with graceful shutdown)
     async fn evict_lru_backend(&mut self) -> bool {
-        let mut candidates: Vec<(PathBuf, Instant)> = self
+        // Peek at LRU entries without promoting them
+        let mut candidates: Vec<PathBuf> = self
             .backends
             .iter()
-            .map(|(k, b)| (k.clone(), b.last_used))
+            .map(|(k, _)| k.clone())
             .collect();
 
-        candidates.sort_by_key(|(_, last_used)| *last_used);
+        // Iterate from LRU (oldest) to MRU (newest) - LruCache iter is MRU-first, so reverse
+        candidates.reverse();
 
-        for (root, _) in candidates {
-            let has_pending = match self.backends.get(&root) {
+        for root in candidates {
+            // Check if backend has pending requests (peek doesn't promote)
+            let has_pending = match self.backends.peek(&root) {
                 Some(b) => b.has_pending().await,
                 None => continue,
             };
@@ -509,7 +543,7 @@ impl McpProxy {
             }
 
             info!("Evicting LRU backend: {}", root.display());
-            if let Some(mut backend) = self.backends.remove(&root) {
+            if let Some(mut backend) = self.backends.pop(&root) {
                 backend.shutdown().await;
             }
             return true;
@@ -580,9 +614,10 @@ impl McpProxy {
         }
     }
 
-    /// Check if a path is git-tracked (with caching and TTL)
-    fn is_path_git_tracked(&mut self, path: &PathBuf) -> bool {
+    /// Check if a path is git-tracked (with caching, TTL, and size limit)
+    async fn is_path_git_tracked(&mut self, path: &PathBuf) -> bool {
         const GIT_CACHE_TTL_SECS: u64 = 60;
+        const GIT_CACHE_MAX_ENTRIES: usize = 10;
         
         // Find the root for this path
         let root = self.roots.iter()
@@ -607,9 +642,25 @@ impl McpProxy {
             self.git_cache_timestamps.remove(&root);
         }
 
+        // Evict oldest entries if cache is too large
+        while self.git_tracked_cache.len() >= GIT_CACHE_MAX_ENTRIES {
+            // Find the oldest entry
+            if let Some(oldest_root) = self.git_cache_timestamps
+                .iter()
+                .min_by_key(|(_, ts)| *ts)
+                .map(|(k, _)| k.clone())
+            {
+                debug!("Git cache full, evicting: {}", oldest_root.display());
+                self.git_tracked_cache.remove(&oldest_root);
+                self.git_cache_timestamps.remove(&oldest_root);
+            } else {
+                break;
+            }
+        }
+
         // Check cache or populate it
         if !self.git_tracked_cache.contains_key(&root) {
-            if let Some(tracked) = git_filter::get_git_tracked_files(&root) {
+            if let Some(tracked) = git_filter::get_git_tracked_files(&root).await {
                 info!("Git filter cache populated for {}: {} files", root.display(), tracked.len());
                 self.git_tracked_cache.insert(root.clone(), tracked);
                 self.git_cache_timestamps.insert(root.clone(), Instant::now());
@@ -693,26 +744,43 @@ impl McpProxy {
         }
     }
 
-    /// Cleanup idle backends
+    /// Cleanup idle backends and unhealthy backends
     async fn cleanup_idle_backends(&mut self, idle_ttl: Duration) {
         let now = Instant::now();
-        let idle_roots: Vec<_> = self.backends
+        
+        // First, collect backends to check
+        let roots_to_check: Vec<_> = self.backends
             .iter()
-            .filter(|(_, b)| now.duration_since(b.last_used) > idle_ttl)
             .map(|(k, _)| k.clone())
             .collect();
 
-        for root in idle_roots {
-            // Check if backend has pending requests
-            if let Some(backend) = self.backends.get(&root) {
-                if backend.has_pending().await {
-                    debug!("Backend {} has pending requests, skipping cleanup", root.display());
+        let mut roots_to_remove = Vec::new();
+
+        for root in roots_to_check {
+            if let Some(backend) = self.backends.peek_mut(&root) {
+                // Check health first
+                if !backend.health_check().await {
+                    info!("Backend {} failed health check, marking for removal", root.display());
+                    roots_to_remove.push(root.clone());
                     continue;
                 }
-            }
 
-            info!("Cleaning up idle backend: {}", root.display());
-            if let Some(mut backend) = self.backends.remove(&root) {
+                // Check idle timeout
+                if now.duration_since(backend.last_used) > idle_ttl {
+                    if !backend.has_pending().await {
+                        info!("Backend {} is idle, marking for removal", root.display());
+                        roots_to_remove.push(root.clone());
+                    } else {
+                        debug!("Backend {} has pending requests, skipping cleanup", root.display());
+                    }
+                }
+            }
+        }
+
+        // Remove marked backends
+        for root in roots_to_remove {
+            info!("Cleaning up backend: {}", root.display());
+            if let Some(mut backend) = self.backends.pop(&root) {
                 backend.shutdown().await;
             }
         }
@@ -721,7 +789,8 @@ impl McpProxy {
     /// Shutdown all backends
     async fn shutdown_all_backends(&mut self) {
         info!("Shutting down all backends");
-        for (root, mut backend) in self.backends.drain() {
+        // Drain all entries from LRU cache
+        while let Some((root, mut backend)) = self.backends.pop_lru() {
             info!("Shutting down backend: {}", root.display());
             backend.shutdown().await;
         }
@@ -754,5 +823,28 @@ impl McpProxy {
             // Assume it's already a path
             Some(PathBuf::from(uri))
         }
+    }
+
+    /// Get current metrics as a JSON value
+    #[allow(dead_code)]
+    pub fn get_metrics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "uptime_seconds": self.metrics_start_time.elapsed().as_secs(),
+            "total_requests": self.metrics_total_requests,
+            "total_errors": self.metrics_total_errors,
+            "active_backends": self.backends.len(),
+            "max_backends": self.backends.cap().get(),
+            "git_cache_entries": self.git_tracked_cache.len(),
+        })
+    }
+
+    /// Increment request counter
+    fn record_request(&mut self) {
+        self.metrics_total_requests += 1;
+    }
+
+    /// Increment error counter
+    fn record_error(&mut self) {
+        self.metrics_total_errors += 1;
     }
 }
